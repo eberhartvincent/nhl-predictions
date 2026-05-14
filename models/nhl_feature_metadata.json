@@ -1,0 +1,45 @@
+{
+  "features": [
+    "xg_per_60",
+    "shots_per_60",
+    "shooting_pct",
+    "hd_xg_per_60",
+    "hd_shooting_pct",
+    "pp_toi_pct",
+    "corsi_pct",
+    "xg_pct",
+    "toi_per_game"
+  ],
+  "feature_medians": {
+    "xg_per_60": 0.862466061230222,
+    "shots_per_60": 7.259190321079571,
+    "shooting_pct": 0.11538461538461539,
+    "hd_xg_per_60": 0.3253546584871556,
+    "hd_shooting_pct": 0.8571428571428571,
+    "pp_toi_pct": 0.10468491916512337,
+    "corsi_pct": 0.52,
+    "xg_pct": 0.52,
+    "toi_per_game": 15.773744292237444
+  },
+  "lg_goals_per_60": 0.843603785185549,
+  "training_years": [
+    2021,
+    2022,
+    2023,
+    2024
+  ],
+  "n_training": 1113,
+  "cv_mae": 0.23863562647712203,
+  "cv_r2": 0.36585385668313564,
+  "feature_importance": {
+    "pp_toi_pct": 0.2476164698600769,
+    "xg_per_60": 0.16907784342765808,
+    "shots_per_60": 0.14893129467964172,
+    "xg_pct": 0.10014556348323822,
+    "corsi_pct": 0.08887510001659393,
+    "toi_per_game": 0.07687408477067947,
+    "hd_shooting_pct": 0.06690027564764023,
+    "shooting_pct": 0.05287078395485878,
+    "hd_xg_per_60": 0.04870861768722534
+  }
+}
