@@ -254,10 +254,24 @@ def run(config: dict, dry_run: bool = False) -> dict:
 
     log.info("Goals top %d | Points top %d | Shots top %d (from %d candidates)",
              len(goal_preds), len(point_preds), len(shot_preds), len(all_predictions))
-    for i, p in enumerate(goal_preds[:5], 1):
-        log.info("  Goals %d: %-22s %s / pt %s / sh %s exp",
+
+    log.info("── 🎯 Goal predictions ──")
+    for i, p in enumerate(goal_preds, 1):
+        log.info("  %2d. %-24s g=%-6s pt=%-6s sh=%s exp",
                  i, p["player_name"], p["goal_pct"],
-                 p["point_pct"], p.get("expected_shots","?"))
+                 p["point_pct"], p.get("expected_shots", "?"))
+
+    log.info("── ⭐ Point predictions ──")
+    for i, p in enumerate(point_preds, 1):
+        log.info("  %2d. %-24s pt=%-6s g=%-6s sh=%s exp",
+                 i, p["player_name"], p["point_pct"],
+                 p["goal_pct"], p.get("expected_shots", "?"))
+
+    log.info("── 🏒 Shot predictions ──")
+    for i, p in enumerate(shot_preds, 1):
+        log.info("  %2d. %-24s sh=%-5s exp  g=%-6s pt=%s",
+                 i, p["player_name"], p.get("expected_shots", "?"),
+                 p["goal_pct"], p["point_pct"])
 
     if not dry_run:
         now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
