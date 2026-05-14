@@ -4,14 +4,8 @@ nhl_train.py
 Annual retraining for the XGBoost NHL goal-rate talent estimator.
 
 Data source: Moneypuck free CSV downloads (moneypuck.com)
-  - No API key, works from GitHub Actions
-  - Confirmed columns: playerId, name, team, position, situation,
-    season, games_played, icetime, goals, I_F_xGoals,
-    I_F_shotsOnGoal, I_F_highDangerShots, I_F_highDangerxGoals,
-    onIce_corsiPercentage, onIce_xGoalsPercentage
-
-Training: Year-N features → Year-(N+1) goals/60 rate (no look-ahead bias)
-Retrain: Once per year after season ends (April/May)
+Training: Year-N features → Year-(N+1) goals/60 (no look-ahead bias)
+Retrain: Once per year after season ends (May 1st cron)
 """
 from __future__ import annotations
 
@@ -36,7 +30,7 @@ MODEL_DIR  = Path("models")
 MODEL_PATH = MODEL_DIR / "nhl_model.json"
 META_PATH  = MODEL_DIR / "nhl_feature_metadata.json"
 
-MIN_TOI_SECONDS = 300 * 60    # 300 minutes = qualifying threshold
+MIN_TOI_SECONDS = 300 * 60    # 300 minutes qualifying threshold
 HEADERS = {"User-Agent": "nhl-goal-predictor/1.0 (github-actions; open-source)"}
 
 SKATERS_URL = (
@@ -44,18 +38,31 @@ SKATERS_URL = (
     "/{season}/regular/skaters.csv"
 )
 
-# Features to train on — all from Moneypuck all-situation rows
 FEATURES = [
-    "xg_per_60",         # individual xG/60 — strongest goal predictor
-    "shots_per_60",      # shot volume per 60
-    "shooting_pct",      # actual shooting %
-    "hd_xg_per_60",      # high-danger xG/60 — shot quality
-    "hd_shooting_pct",   # high-danger shooting %
-    "pp_toi_pct",        # power play TOI fraction — huge for goal volume
-    "corsi_pct",         # team possession share
-    "xg_pct",            # team xG share when on ice
-    "toi_per_game",      # average ice time per game
+    "xg_per_60",
+    "shots_per_60",
+    "shooting_pct",
+    "hd_xg_per_60",
+    "hd_shooting_pct",
+    "pp_toi_pct",
+    "corsi_pct",
+    "xg_pct",
+    "toi_per_game",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Safe column accessor — the core fix.
+# Moneypuck column names vary slightly across seasons and versions.
+# e.g. goals may be "I_F_goals" or "goals"; xG may be "I_F_xGoals" or "xGoals".
+# Always returns a float Series, never a scalar.
+# ---------------------------------------------------------------------------
+def _col(df: pd.DataFrame, *names: str, default: float = 0.0) -> pd.Series:
+    """Return first matching column as a numeric float Series, or a default Series."""
+    for name in names:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce").fillna(default)
+    return pd.Series(float(default), index=df.index, dtype=float)
 
 
 def fetch_season(season: int) -> pd.DataFrame | None:
@@ -64,7 +71,8 @@ def fetch_season(season: int) -> pd.DataFrame | None:
         r = requests.get(url, headers=HEADERS, timeout=30)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        log.info("Moneypuck/%d: %d rows, cols: %s", season, len(df), df.columns.tolist()[:10])
+        log.info("Moneypuck/%d: %d rows", season, len(df))
+        log.info("Moneypuck/%d columns: %s", season, df.columns.tolist())
         return df
     except Exception as exc:
         log.warning("Moneypuck/%d failed: %s", season, exc)
@@ -73,72 +81,95 @@ def fetch_season(season: int) -> pd.DataFrame | None:
 
 def build_season_frame(df_raw: pd.DataFrame, season: int) -> pd.DataFrame:
     """
-    Build a canonical feature frame from a raw Moneypuck CSV.
-    One row per qualifying forward, all-situation stats.
+    Build canonical feature frame from a raw Moneypuck CSV.
+    Uses _col() for all column access so missing columns never crash.
     """
-    # All-situation rows only
+    # All-situation rows
     df = df_raw[df_raw["situation"] == "all"].copy()
 
-    # Forwards only for training (defensemen have very different goal rates)
+    # Forwards only
     if "position" in df.columns:
         df = df[df["position"].isin(["C", "L", "R"])].copy()
 
-    # Filter by TOI
-    toi_col = "icetime" if "icetime" in df.columns else None
+    # TOI filter
+    toi_col = next((c for c in ["icetime", "toi", "timeOnIce"] if c in df.columns), None)
     if toi_col is None:
-        log.warning("No icetime column in season %d", season)
+        log.warning("Season %d: no TOI column found. Skipping.", season)
         return pd.DataFrame()
 
-    df = df[df[toi_col] >= MIN_TOI_SECONDS].copy()
+    df = df[pd.to_numeric(df[toi_col], errors="coerce").fillna(0) >= MIN_TOI_SECONDS].copy()
+    if df.empty:
+        log.warning("Season %d: no players passed TOI filter.", season)
+        return pd.DataFrame()
 
-    # Compute derived features
-    toi_hr = df[toi_col] / 3600
-    toi_min = df[toi_col] / 60
-    gp = df.get("games_played", pd.Series(1, index=df.index))
+    toi_sec = _col(df, "icetime", "toi", "timeOnIce")
+    toi_hr  = toi_sec / 3600
+    toi_min = toi_sec / 60
+    gp      = _col(df, "games_played", "gamesPlayed", default=1.0)
+    gp      = gp.replace(0, 1)   # avoid division by zero
 
-    goals   = pd.to_numeric(df.get("goals", 0), errors="coerce").fillna(0)
-    xg      = pd.to_numeric(df.get("I_F_xGoals", 0), errors="coerce").fillna(0)
-    shots   = pd.to_numeric(df.get("I_F_shotsOnGoal", 0), errors="coerce").fillna(0)
-    hd_sh   = pd.to_numeric(df.get("I_F_highDangerShots", 0), errors="coerce").fillna(0)
-    hd_xg   = pd.to_numeric(df.get("I_F_highDangerxGoals", 0), errors="coerce").fillna(0)
-    corsi   = pd.to_numeric(df.get("onIce_corsiPercentage", np.nan), errors="coerce")
-    xg_pct  = pd.to_numeric(df.get("onIce_xGoalsPercentage", np.nan), errors="coerce")
+    # Goals — try all known Moneypuck naming conventions
+    goals  = _col(df, "I_F_goals", "goals", "Goals")
+    xg     = _col(df, "I_F_xGoals", "xGoals", "I_F_expectedGoals")
+    shots  = _col(df, "I_F_shotsOnGoal", "shotsOnGoal", "I_F_shots")
+    hd_sh  = _col(df, "I_F_highDangerShots", "highDangerShots")
+    hd_xg  = _col(df, "I_F_highDangerxGoals", "highDangerxGoals", "I_F_highDangerExpectedGoals")
+    corsi  = _col(df, "onIce_corsiPercentage", "corsiPercentage", default=float("nan"))
+    xg_pct = _col(df, "onIce_xGoalsPercentage", "xGoalsPercentage", default=float("nan"))
 
-    # Fetch PP TOI from the same raw frame
-    pp_rows = df_raw[
+    # Derived per-60 rates
+    toi_hr_safe = toi_hr.replace(0, np.nan)
+    goals_60    = goals / toi_hr_safe
+    xg_60       = xg    / toi_hr_safe
+    shots_60    = shots / toi_hr_safe
+    hd_xg_60    = hd_xg / toi_hr_safe
+    sh_pct      = goals.where(shots >= 10, np.nan) / shots.replace(0, np.nan)
+    hd_sh_pct   = goals.where(hd_sh >= 5, np.nan) / hd_sh.replace(0, np.nan)
+
+    # PP TOI fraction from power play situation rows
+    pp_raw = df_raw[
         (df_raw["situation"] == "5on4") &
-        df_raw["playerId"].isin(df["playerId"])
-    ].set_index("playerId")["icetime"].rename("pp_toi")
+        df_raw["playerId"].isin(df["playerId"].values)
+    ].copy()
 
-    out = pd.DataFrame()
+    pp_toi_series = pd.Series(0.0, index=df.index, dtype=float)
+    if not pp_raw.empty and toi_col in pp_raw.columns:
+        pp_map = (
+            pd.to_numeric(pp_raw[toi_col], errors="coerce")
+            .fillna(0)
+            .groupby(pp_raw["playerId"])
+            .sum()
+        )
+        pp_mapped = df["playerId"].map(pp_map).fillna(0)
+        pp_toi_series = pp_mapped / toi_sec.replace(0, np.nan)
+
+    out = pd.DataFrame(index=df.index)
     out["player_id"]       = df["playerId"].values
     out["season"]          = season
     out["games_played"]    = gp.values
-    out["season_toi_sec"]  = df[toi_col].values
+    out["season_toi_sec"]  = toi_sec.values
     out["goals"]           = goals.values
-    out["goals_per_60"]    = (goals / toi_hr).values    # TARGET
-    out["xg_per_60"]       = (xg / toi_hr).values
-    out["shots_per_60"]    = (shots / toi_hr).values
-    out["shooting_pct"]    = np.where(shots >= 10, goals / shots, np.nan)
-    out["hd_xg_per_60"]    = (hd_xg / toi_hr).values
-    out["hd_shooting_pct"] = np.where(hd_sh >= 5, goals / hd_sh, np.nan)
+    out["goals_per_60"]    = goals_60.values           # TARGET
+    out["xg_per_60"]       = xg_60.values
+    out["shots_per_60"]    = shots_60.values
+    out["shooting_pct"]    = sh_pct.values
+    out["hd_xg_per_60"]    = hd_xg_60.values
+    out["hd_shooting_pct"] = hd_sh_pct.values
     out["corsi_pct"]       = corsi.values
     out["xg_pct"]          = xg_pct.values
     out["toi_per_game"]    = (toi_min / gp).values
+    out["pp_toi_pct"]      = pp_toi_series.values
 
-    # PP TOI fraction
-    pp_toi_vals = df["playerId"].map(pp_rows).fillna(0)
-    out["pp_toi_pct"] = (pp_toi_vals.values / df[toi_col].values)
-
-    log.info("Season %d: %d qualifying forwards", season, len(out))
-    return out.reset_index(drop=True)
+    out = out.replace([np.inf, -np.inf], np.nan).reset_index(drop=True)
+    log.info("Season %d: %d qualifying forwards assembled.", season, len(out))
+    return out
 
 
 def build_training_pairs(
     stats: pd.DataFrame,
     features: list[str],
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Year-N features → Year-(N+1) goals/60 rate."""
+    """Year-N features → Year-(N+1) goals/60."""
     seasons = sorted(stats["season"].unique())
     all_X, all_y = [], []
 
@@ -194,10 +225,12 @@ def train(years: list[int] | None = None) -> dict:
     stats = pd.concat(frames, ignore_index=True)
     log.info("Total player-seasons: %d", len(stats))
 
-    available = [f for f in FEATURES if f in stats.columns
-                 and stats[f].notna().sum() >= 20]
+    available = [
+        f for f in FEATURES
+        if f in stats.columns and stats[f].notna().sum() >= 20
+    ]
     if len(available) < 2:
-        raise RuntimeError(f"Too few features: {available}")
+        raise RuntimeError(f"Too few usable features: {available}")
     log.info("Training on %d features: %s", len(available), available)
 
     X, y = build_training_pairs(stats, available)
