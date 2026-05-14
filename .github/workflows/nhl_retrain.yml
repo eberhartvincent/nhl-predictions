@@ -1,19 +1,9 @@
 # .github/workflows/nhl_retrain.yml
 # =====================================================================
-#  NHL Goal Predictor — Annual Model Retraining
-# =====================================================================
-#
-#  Runs once per year on May 1st — after the regular season ends
-#  (playoffs run April-June but regular season data is complete).
-#
-#  Data: Moneypuck free CSV downloads (no API key needed)
-#  Training: Year-N → Year-(N+1) goals/60 (no look-ahead bias)
-#  Output: models/nhl_model.json + models/nhl_feature_metadata.json
-#          committed back to the repo
-#
+#  NHL Goal Predictor — Annual Model Retraining (3 models)
 # =====================================================================
 
-name: 🔁 Retrain NHL Model
+name: 🔁 Retrain NHL Models
 
 on:
   schedule:
@@ -35,7 +25,7 @@ on:
 
 jobs:
   retrain:
-    name: Train XGBoost NHL Goal Model
+    name: Train XGBoost NHL Models (Goals · Points · Shots)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -52,14 +42,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Train model
+      - name: Train all three models
         run: |
           YEARS="${{ github.event.inputs.years || '2021,2022,2023,2024' }}"
           python - << EOF
@@ -70,8 +59,9 @@ jobs:
           from src.models.nhl_train import train
           years = [int(y.strip()) for y in "${YEARS}".split(",")]
           try:
-              meta = train(years=years)
-              print(f"::notice::NHL training complete — CV R²={meta['cv_r2']:.4f}, MAE={meta['cv_mae']:.4f}, n={meta['n_training']}")
+              all_meta = train(years=years)
+              for name, meta in all_meta.items():
+                  print(f"::notice::{name}: CV R²={meta['cv_r2']:.4f}  MAE={meta['cv_mae']:.4f}  n={meta['n_training']}")
           except Exception as e:
               print(f"::error::NHL training failed: {e}")
               sys.exit(1)
@@ -82,45 +72,74 @@ jobs:
           python - << 'EOF'
           import json
           from pathlib import Path
-          meta = json.loads(Path("models/nhl_feature_metadata.json").read_text())
-          print("=" * 50)
+
+          print("=" * 55)
           print("NHL MODEL SUMMARY")
-          print("=" * 50)
-          print(f"Training years : {meta['training_years']}")
-          print(f"Training n     : {meta['n_training']}")
-          print(f"CV R²          : {meta['cv_r2']:.4f}")
-          print(f"CV MAE         : {meta['cv_mae']:.4f} goals/60")
-          print(f"LG avg g/60    : {meta['lg_goals_per_60']:.4f}")
-          print("\nFeature Importance:")
-          for feat, imp in meta['feature_importance'].items():
-              bar = "█" * int(imp * 100)
-              print(f"  {feat:20s} {imp:.4f}  {bar}")
+          print("=" * 55)
+
+          for name in ("goals", "points", "shots"):
+              path = Path(f"models/nhl_{name}_metadata.json")
+              if not path.exists():
+                  print(f"{name}: metadata not found")
+                  continue
+              meta = json.loads(path.read_text())
+              print(f"\n{name.upper()} MODEL")
+              print(f"  Training years : {meta['training_years']}")
+              print(f"  Samples        : {meta['n_training']}")
+              print(f"  CV R²          : {meta['cv_r2']:.4f}")
+              print(f"  CV MAE         : {meta['cv_mae']:.4f} {name}/60")
+              print(f"  LG avg         : {meta['lg_avg']:.4f} {name}/60")
+              print(f"  Top features:")
+              for feat, imp in list(meta['feature_importance'].items())[:4]:
+                  bar = "█" * int(imp * 80)
+                  print(f"    {feat:25s} {imp:.4f}  {bar}")
+
+          print("=" * 55)
           EOF
 
-      - name: Commit model
+      - name: Commit models to repository
         if: ${{ github.event.inputs.dry_run != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add models/nhl_model.json models/nhl_feature_metadata.json
+
+          git add \
+            models/nhl_goals_model.json  models/nhl_goals_metadata.json \
+            models/nhl_points_model.json models/nhl_points_metadata.json \
+            models/nhl_shots_model.json  models/nhl_shots_metadata.json
+
           if git diff --staged --quiet; then
-            echo "Model unchanged — nothing to commit."
+            echo "Models unchanged — nothing to commit."
           else
-            METRICS=$(python -c "
-          import json; from pathlib import Path
-          m = json.loads(Path('models/nhl_feature_metadata.json').read_text())
-          print(f\"R²={m['cv_r2']:.4f} MAE={m['cv_mae']:.4f} n={m['n_training']}\")
-          ")
-            git commit -m "chore: retrain NHL model [${METRICS}]"
+            SUMMARY=$(python - << 'EOF'
+          import json
+          from pathlib import Path
+          parts = []
+          for name in ("goals", "points", "shots"):
+              p = Path(f"models/nhl_{name}_metadata.json")
+              if p.exists():
+                  m = json.loads(p.read_text())
+                  parts.append(f"{name} R²={m['cv_r2']:.4f}")
+          print(" | ".join(parts))
+          EOF
+          )
+            git commit -m "chore: retrain NHL models [${SUMMARY}]
+
+          Training years: ${{ github.event.inputs.years || '2021,2022,2023,2024' }}
+          Run: ${{ github.run_id }}"
             git push
-            echo "✅ NHL model committed."
+            echo "✅ All three NHL models committed."
           fi
 
       - name: Upload artifact backup
         uses: actions/upload-artifact@v4
         with:
-          name: nhl-model-${{ github.run_id }}
+          name: nhl-models-${{ github.run_id }}
           path: |
-            models/nhl_model.json
-            models/nhl_feature_metadata.json
+            models/nhl_goals_model.json
+            models/nhl_goals_metadata.json
+            models/nhl_points_model.json
+            models/nhl_points_metadata.json
+            models/nhl_shots_model.json
+            models/nhl_shots_metadata.json
           retention-days: 90
