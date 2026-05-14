@@ -1,0 +1,93 @@
+# .github/workflows/nhl_predictions.yml
+# =====================================================================
+#  NHL Goal Scorer Predictor — Daily Workflow
+# =====================================================================
+#
+#  Schedule: 4:30 PM ET (20:30 UTC) — after most lineups are confirmed
+#            and before the first puck drop (~7 PM ET).
+#
+#  Required secrets (same as MLB system):
+#    EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENTS
+#
+#  Optional secrets:
+#    (no weather API needed — indoor arenas)
+#
+# =====================================================================
+
+name: 🏒 NHL Goal Predictions
+
+on:
+  schedule:
+    - cron: "30 20 * * *"   # 4:30 PM ET daily (UTC-4)
+
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Game date (YYYY-MM-DD or 'today')"
+        required: false
+        default: "today"
+        type: string
+      top_n:
+        description: "Number of predictions"
+        required: false
+        default: "20"
+        type: string
+      dry_run:
+        description: "Predict without sending email"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  predict-and-send:
+    name: Generate & Send NHL Goal Predictions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Resolve inputs
+        id: resolve
+        run: |
+          DATE="${{ github.event.inputs.date || 'today' }}"
+          TOP_N="${{ github.event.inputs.top_n || '20' }}"
+          DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+          echo "date=${DATE}" >> $GITHUB_OUTPUT
+          echo "top_n=${TOP_N}" >> $GITHUB_OUTPUT
+          echo "dry_run=${DRY_RUN}" >> $GITHUB_OUTPUT
+          echo "📅 Date: ${DATE} | Top N: ${TOP_N} | Dry run: ${DRY_RUN}"
+
+      - name: Run NHL prediction pipeline
+        env:
+          EMAIL_SENDER:     ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:   ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+          PREDICT_DATE:     ${{ steps.resolve.outputs.date }}
+          TOP_N:            ${{ steps.resolve.outputs.top_n }}
+        run: |
+          DRY_FLAG=""
+          if [ "${{ steps.resolve.outputs.dry_run }}" = "true" ]; then
+            DRY_FLAG="--dry-run"
+          fi
+          python nhl_main.py \
+            --date "${{ steps.resolve.outputs.date }}" \
+            --top-n "${{ steps.resolve.outputs.top_n }}" \
+            $DRY_FLAG
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::NHL prediction pipeline failed."
