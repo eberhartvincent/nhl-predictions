@@ -1,0 +1,41 @@
+{
+  "model_name": "points",
+  "target": "points_per_60",
+  "features": [
+    "xg_per_60",
+    "shots_per_60",
+    "primary_assists_per_60",
+    "pp_toi_pct",
+    "corsi_pct",
+    "xg_pct",
+    "toi_per_game"
+  ],
+  "feature_medians": {
+    "xg_per_60": 0.862466061230222,
+    "shots_per_60": 7.259190321079571,
+    "primary_assists_per_60": 0.6497692287858082,
+    "pp_toi_pct": 0.10468491916512337,
+    "corsi_pct": 0.52,
+    "xg_pct": 0.52,
+    "toi_per_game": 15.773744292237444
+  },
+  "lg_avg": 1.9871498596124495,
+  "training_years": [
+    2021,
+    2022,
+    2023,
+    2024
+  ],
+  "n_training": 1113,
+  "cv_mae": 0.40447352750404236,
+  "cv_r2": 0.5718471597020636,
+  "feature_importance": {
+    "pp_toi_pct": 0.36999791860580444,
+    "toi_per_game": 0.20132985711097717,
+    "corsi_pct": 0.12027353048324585,
+    "xg_pct": 0.1009289100766182,
+    "primary_assists_per_60": 0.08961650729179382,
+    "shots_per_60": 0.06415817886590958,
+    "xg_per_60": 0.05369512736797333
+  }
+}
