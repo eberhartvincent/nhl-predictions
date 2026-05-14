@@ -1,0 +1,16 @@
+# Core data / ML
+pandas>=2.0.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+xgboost>=2.0.0
+scipy>=1.12.0
+
+# HTTP & APIs
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Config & utilities
+PyYAML>=6.0.1
+python-dateutil>=2.9.0
+pytz>=2024.1
+tenacity>=8.2.0
