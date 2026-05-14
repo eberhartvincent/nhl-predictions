@@ -3,31 +3,29 @@
 # ============================================================
 
 prediction:
-  top_n: 20
   date: "today"
-  min_games_played: 10        # min games this season to qualify
-  min_toi_per_game: 8         # min avg time on ice (minutes) to qualify
-  positions: ["C", "L", "R"]  # exclude defensemen by default (set to ["C","L","R","D"] to include)
+  min_games_played: 10
+  min_toi_per_game: 8
+  positions: ["C", "L", "R"]
+
+  # Top N players shown in each section independently
+  top_n_goals:  15
+  top_n_points: 15
+  top_n_shots:  15
+
+  # Shots: line for P(over X.5 shots) — matches common sportsbook line
+  shots_line: 2.5
 
 model:
-  weights:
-    xg_per_60:        0.30    # individual expected goals per 60 — strongest signal
-    shooting_pct:     0.15    # actual shooting percentage
-    shots_per_60:     0.12    # shot volume
-    pp_toi_pct:       0.13    # power play ice time share
-    hd_shooting_pct:  0.10    # high-danger shooting percentage
-    goalie_factor:    0.12    # opposing goalie GSAx
-    back_to_back:     0.05    # fatigue adjustment
-    home_factor:      0.03    # home ice advantage
+  recent_form_games: 10
+  avg_toi_per_game: 15.5
 
-  recent_form_games: 10       # window for recent form calculation
-  career_season_blend: 0.30   # weight on career stats vs season
-
-  # Poisson model
-  lg_avg_goals_per_60: 0.65   # league average goals/60 for forwards
-  lg_avg_save_pct: 0.906      # league average goalie save %
-  avg_toi_per_game: 15.5      # estimated minutes if not in confirmed lineup
+  # League averages (2022-25 NHL forwards)
+  lg_avg_goals_per_60:  0.65
+  lg_avg_points_per_60: 1.70
+  lg_avg_shots_per_60:  8.50
+  lg_avg_save_pct:      0.906
 
 email:
-  subject: "🏒 Top {n} Goal Scorer Predictions — {date}"
-  from_name: "NHL Goal Predictor"
+  subject: "🏒 NHL Predictions — {date}"
+  from_name: "NHL Predictor"

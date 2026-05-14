@@ -1,29 +1,27 @@
 """
 nhl_predictor.py
 ================
-Ensemble goal probability model — same two-path architecture as MLB HR predictor.
-
-Path 1 — XGBoost talent model (when trained model exists)
-  Predicts goals/60 rate from Moneypuck xG, shot quality, PP time features.
-
-Path 2 — Statistical baseline (always runs)
-  Bayesian-blended goals/60 from NHL API season + career stats.
-
-Game-level adjustments (applied to whichever base rate is used):
-  goalie quality, power play time, home ice, back-to-back fatigue, recent form.
-
-Final: P(≥1 goal) via Poisson distribution.
+Returns three predictions per player: goals, points, shots.
+Each uses the corresponding XGBoost model blended with the statistical baseline.
 """
 from __future__ import annotations
-import logging, math
+import logging
 import numpy as np
 from src.features.nhl_engineer import (
-    LG_GOALS_PER_60, goals_per_60_from_stats, goalie_factor,
-    recent_form_factor, pp_adjustment, home_factor,
-    back_to_back_factor, poisson_goal_probability,
+    LG_GOALS_PER_60, LG_POINTS_PER_60, LG_SHOTS_PER_60,
+    goals_per_60_from_stats, points_per_60_from_stats, shots_per_60_from_stats,
+    goalie_factor, recent_form_factor, pp_adjustment,
+    home_factor, back_to_back_factor,
+    poisson_prob_at_least_one, poisson_prob_over_line,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _blend(xgb_rate, stat_rate):
+    if xgb_rate is not None:
+        return 0.65 * xgb_rate + 0.35 * stat_rate, "xgboost+statistical"
+    return stat_rate, "statistical"
 
 
 def ensemble_predict(
@@ -36,82 +34,104 @@ def ensemble_predict(
     is_back_to_back: bool,
     estimated_toi_min: float,
     config: dict,
-    xgb_model=None,
-    xgb_meta: dict | None = None,
+    models: dict | None = None,
+    metas:  dict | None = None,
 ) -> dict:
     """
-    Full ensemble prediction for one skater in tonight's game.
-
-    Returns dict with goal_probability, goal_pct, confidence_tier, factors.
+    Returns a dict with three independent probability predictions:
+      goals_probability, points_probability, shots_probability
+    plus their display strings and all factor breakdowns.
     """
-    # ── Base goals/60 rate ───────────────────────────────────────────────────
-    stat_rate, season_toi_min = goals_per_60_from_stats(season_stats, career_stats)
+    from src.models.nhl_model_registry import predict_rate
 
-    xgb_rate = None
-    if xgb_model is not None and xgb_meta is not None:
-        try:
-            from src.models.nhl_model_registry import predict_goals_per_60
-            xgb_rate = predict_goals_per_60(mp_metrics, xgb_model, xgb_meta)
-        except Exception as exc:
-            log.debug("XGBoost prediction failed: %s", exc)
+    models = models or {}
+    metas  = metas  or {}
+    shots_line = float(config.get("prediction", {}).get("shots_line", 2.5))
 
-    if xgb_rate is not None:
-        base_rate   = 0.65 * xgb_rate + 0.35 * stat_rate
-        rate_source = "xgboost+statistical"
-    else:
-        base_rate   = stat_rate
-        rate_source = "statistical"
+    # ── Shared game-level factors ─────────────────────────────────────────
+    g_factor = goalie_factor(goalie_metrics, config)
+    home_f   = home_factor(is_home)
+    b2b_f    = back_to_back_factor(is_back_to_back)
+    pp_f     = pp_adjustment(float(mp_metrics.get("pp_toi_pct") or 0))
 
-    base_rate = float(np.clip(base_rate, 0.001, 5.0))
-
-    # ── Game-level adjustments ───────────────────────────────────────────────
-    g_factor   = goalie_factor(goalie_metrics, config)
-    pp_f       = pp_adjustment(float(mp_metrics.get("pp_toi_pct") or LG_GOALS_PER_60))
-    home_f     = home_factor(is_home)
-    b2b_f      = back_to_back_factor(is_back_to_back)
-    recent_f   = recent_form_factor(recent_games, config.get("model", {}).get("recent_form_games", 10))
-
-    # ── Poisson probability ──────────────────────────────────────────────────
-    prob, lam = poisson_goal_probability(
-        goals_per_60=base_rate,
-        toi_minutes=estimated_toi_min,
-        goalie_f=g_factor,
-        pp_f=pp_f,
-        home_f=home_f,
-        b2b_f=b2b_f,
-        recent_f=recent_f,
+    # ── Goals ─────────────────────────────────────────────────────────────
+    stat_g, season_toi  = goals_per_60_from_stats(season_stats, career_stats)
+    xgb_g  = predict_rate(mp_metrics, "goals",  models.get("goals"),  metas.get("goals",  {}))
+    base_g, src_g = _blend(xgb_g, stat_g)
+    recent_g = recent_form_factor(recent_games, "goals", prior=LG_GOALS_PER_60)
+    goal_prob, goal_lam = poisson_prob_at_least_one(
+        base_g, estimated_toi_min, g_factor, home_f, b2b_f, pp_f, recent_g
     )
 
-    # ── Confidence tier ──────────────────────────────────────────────────────
-    games_played = int(season_stats.get("gamesPlayed", 0))
-    has_mp       = float(mp_metrics.get("xg_per_60") or 0) > 0
+    # ── Points ────────────────────────────────────────────────────────────
+    stat_p, _ = points_per_60_from_stats(season_stats, career_stats)
+    xgb_p     = predict_rate(mp_metrics, "points", models.get("points"), metas.get("points", {}))
+    base_p, src_p = _blend(xgb_p, stat_p)
+    recent_p = recent_form_factor(recent_games, "points", prior=LG_POINTS_PER_60)
+    # Goalie factor matters less for points (assists on goals vs any goals)
+    point_prob, point_lam = poisson_prob_at_least_one(
+        base_p, estimated_toi_min, g_factor * 0.5 + 0.5, home_f, b2b_f, pp_f, recent_p
+    )
 
-    if xgb_rate is not None and games_played >= 20 and has_mp:
+    # ── Shots ─────────────────────────────────────────────────────────────
+    stat_s, _ = shots_per_60_from_stats(season_stats, career_stats)
+    xgb_s     = predict_rate(mp_metrics, "shots", models.get("shots"), metas.get("shots", {}))
+    base_s, src_s = _blend(xgb_s, stat_s)
+    recent_s  = recent_form_factor(recent_games, "shots", prior=LG_SHOTS_PER_60)
+    # Goalie doesn't affect shot volume, only home/b2b/pp
+    shot_prob, shot_lam = poisson_prob_over_line(
+        base_s, estimated_toi_min, shots_line, home_f, b2b_f, pp_f, recent_s
+    )
+
+    # ── Confidence ────────────────────────────────────────────────────────
+    gp      = int(season_stats.get("gamesPlayed", 0))
+    has_mp  = float(mp_metrics.get("xg_per_60") or 0) > 0
+    has_xgb = any(models.get(n) is not None for n in ("goals", "points", "shots"))
+
+    if has_xgb and gp >= 20 and has_mp:
         tier = "High"
-    elif games_played >= 10 or has_mp:
+    elif gp >= 10 or has_mp:
         tier = "Medium"
     else:
         tier = "Low"
 
     return {
-        "goal_probability":  round(prob, 4),
-        "goal_pct":          f"{prob * 100:.1f}%",
+        # ── Goals ─────────────────────────────────────────────────────────
+        "goal_probability":  round(goal_prob, 4),
+        "goal_pct":          f"{goal_prob * 100:.1f}%",
+        "goal_lambda":       goal_lam,
+        "goal_rate_source":  src_g,
+
+        # ── Points ────────────────────────────────────────────────────────
+        "point_probability": round(point_prob, 4),
+        "point_pct":         f"{point_prob * 100:.1f}%",
+        "point_lambda":      point_lam,
+        "point_rate_source": src_p,
+
+        # ── Shots ─────────────────────────────────────────────────────────
+        "shot_probability":  round(shot_prob, 4),
+        "shot_pct":          f"{shot_prob * 100:.1f}%",
+        "shot_lambda":       shot_lam,           # = expected shots tonight
+        "shot_line":         shots_line,
+        "shot_rate_source":  src_s,
+        "expected_shots":    round(shot_lam, 1),
+
+        # ── Shared ────────────────────────────────────────────────────────
         "confidence_tier":   tier,
-        "rate_source":       rate_source,
         "factors": {
-            "base_goals_per_60": round(base_rate, 4),
-            "stat_rate":         round(stat_rate, 4),
-            "xgb_rate":          round(xgb_rate, 4) if xgb_rate is not None else None,
             "goalie_factor":     round(g_factor, 3),
             "pp_factor":         round(pp_f, 3),
             "home_factor":       round(home_f, 3),
             "b2b_factor":        round(b2b_f, 3),
-            "recent_form":       round(recent_f, 3),
+            "recent_goal_form":  round(recent_g, 3),
             "estimated_toi_min": round(estimated_toi_min, 1),
-            "lambda":            lam,
+            "base_goals_per_60": round(float(base_g), 4),
+            "base_points_per_60":round(float(base_p), 4),
+            "base_shots_per_60": round(float(base_s), 4),
         },
         "mp_metrics": {
             k: v for k, v in mp_metrics.items()
-            if k in ("xg_per_60", "shooting_pct", "pp_toi_pct", "hd_xg_per_60", "toi_per_game")
+            if k in ("xg_per_60", "shots_per_60", "shooting_pct",
+                     "pp_toi_pct", "toi_per_game")
         },
     }
